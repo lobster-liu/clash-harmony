@@ -2107,7 +2107,9 @@ struct Index {
           } else {
             ForEach(this.profileState.items, (item: ClashProfile) => {
               this.ProfileRow(item)
-            }, (item: ClashProfile) => item.uid)
+              // key 里带上会变化的字段：ForEach 对相同 key 的条目会复用子组件、
+              // 不再重新执行 @Builder，订阅下载完成后行内文字就一直是「0 个节点 · 未下载」。
+            }, (item: ClashProfile) => `${item.uid}-${item.updatedAt}-${item.nodeCount}-${item.filePath.length}`)
           }
         }
         .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
