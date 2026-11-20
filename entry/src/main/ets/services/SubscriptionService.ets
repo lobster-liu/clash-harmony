@@ -31,6 +31,54 @@ function hintForCode(code: number): string {
 
 const USER_AGENT: string = 'clash-meta/1.19.0 clash-harmony/0.1.0';
 
+// 手机在国内直连 raw.githubusercontent.com 会被拦（浏览器都打不开），而 GitHub 相关的
+// 订阅又大多放在那里。实测 ghproxy.net 这类反代可以从手机直连（156 ms），所以原文失败时
+// 自动换镜像再试：只要有一条通道能取到内容就不必让用户自己拼镜像地址。
+const GITHUB_RAW_PREFIX: string = 'https://raw.githubusercontent.com/';
+const MIRROR_PREFIXES: string[] = ['https://ghproxy.net/', 'https://ghfast.top/'];
+
+interface MirrorFetchResult {
+  payload: FetchResult;
+  usedUrl: string;
+}
+
+function toJsDelivr(url: string): string {
+  // https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>
+  //   -> https://cdn.jsdelivr.net/gh/<owner>/<repo>@<branch>/<path>
+  if (!url.startsWith(GITHUB_RAW_PREFIX)) {
+    return '';
+  }
+  const parts: string[] = url.slice(GITHUB_RAW_PREFIX.length).split('/');
+  if (parts.length < 4) {
+    return '';
+  }
+  const path: string = parts.slice(3).join('/');
+  return `https://cdn.jsdelivr.net/gh/${parts[0]}/${parts[1]}@${parts[2]}/${path}`;
+}
+
+function mirrorCandidates(url: string): string[] {
+  const list: string[] = [url];
+  if (!url.startsWith(GITHUB_RAW_PREFIX)) {
+    return list;
+  }
+  for (let index = 0; index < MIRROR_PREFIXES.length; index++) {
+    list.push(`${MIRROR_PREFIXES[index]}${url}`);
+  }
+  const jsDelivr: string = toJsDelivr(url);
+  if (jsDelivr.length > 0) {
+    list.push(jsDelivr);
+  }
+  return list;
+}
+
+function mirrorLabel(url: string, original: string): string {
+  if (url === original) {
+    return '';
+  }
+  const index: number = url.indexOf('/', 'https://'.length);
+  return index > 0 ? url.slice('https://'.length, index) : url;
+}
+
 export class SubscriptionService {
   static async updateProfile(context: common.Context, uid: string): Promise<SubscriptionUpdateResult> {
     const state: ProfileState = await ProfileStore.load(context);
@@ -52,14 +100,17 @@ export class SubscriptionService {
 
     // 先按常规下载；只有当默认网络被自己的 VPN 隧道接管、请求又被隧道拒绝时，
     // 才临时断开隧道重试一次（隧道内没有可用节点时就是这种表现：2300007）。
+    // 每次尝试都会把原文与镜像候选依次试一遍（GitHub raw 在手机上直连不通）。
     let releasedTunnel: boolean = false;
-    let payload: FetchResult = await SubscriptionService.fetchText(profile.source);
-    if (!payload.ok && VpnService.tunnelPresent()) {
+    let fetched: MirrorFetchResult = await SubscriptionService.fetchWithMirrors(profile.source);
+    if (!fetched.payload.ok && VpnService.tunnelPresent()) {
       releasedTunnel = await VpnService.releaseTunnelForDownload();
       if (releasedTunnel) {
-        payload = await SubscriptionService.fetchText(profile.source);
+        fetched = await SubscriptionService.fetchWithMirrors(profile.source);
       }
     }
+    const payload: FetchResult = fetched.payload;
+    const viaMirror: string = mirrorLabel(fetched.usedUrl, profile.source);
     if (!payload.ok) {
       return {
         ok: false,
@@ -93,9 +144,11 @@ export class SubscriptionService {
     const nextState: ProfileState = await ProfileStore.replace(context, nextProfile);
 
     const baseMessage: string = converted.converted ? `订阅已转换，保存 ${nextProfile.nodeCount} 个节点` : `订阅已更新，保存 ${nextProfile.nodeCount} 个节点`;
+    const mirrorNote: string = viaMirror.length > 0 ? `（原地址不通，已改用镜像 ${viaMirror} 下载）` : '';
+    const tunnelNote: string = releasedTunnel ? '（下载时已临时断开 VPN，请重新点「连接」）' : '';
     return {
       ok: true,
-      message: releasedTunnel ? `${baseMessage}（下载时已临时断开 VPN，请重新点「连接」）` : baseMessage,
+      message: `${baseMessage}${mirrorNote}${tunnelNote}`,
       state: nextState
     };
   }
@@ -107,6 +160,28 @@ export class SubscriptionService {
       }
     }
     return undefined;
+  }
+
+  private static async fetchWithMirrors(url: string): Promise<MirrorFetchResult> {
+    const candidates: string[] = mirrorCandidates(url);
+    let last: FetchResult = {
+      ok: false,
+      message: '订阅下载失败',
+      text: ''
+    };
+    for (let index = 0; index < candidates.length; index++) {
+      last = await SubscriptionService.fetchText(candidates[index]);
+      if (last.ok) {
+        return {
+          payload: last,
+          usedUrl: candidates[index]
+        };
+      }
+    }
+    return {
+      payload: last,
+      usedUrl: url
+    };
   }
 
   private static async fetchText(url: string): Promise<FetchResult> {

@@ -262,3 +262,40 @@ GET /group/♻️ 自动选择/delay?timeout=5000&url=https://www.gstatic.com/ge
 
 **验证**：重建装机后点「连接」，首页显示 `已连接 · 1.10.0 · 5 连接 · 🇯🇵 日本 | JPN 4 70 ms`——报的是真实叶子节点与实测延迟，不再出现「组名 + 不可达」。
 
+
+## 11. GitHub 订阅导入失败：raw.githubusercontent 在手机上被拦，改走镜像
+
+**症状**：订阅地址是 `https://raw.githubusercontent.com/...` 时，无论是否已连上 VPN，导入都失败：
+
+```
+warn 订阅下载失败（2300999 · Internal error）（请求未完成：先连接 VPN 后再导入，或用「本地文件」导入）
+```
+
+而同一台手机上下载 `https://www.baidu.com/`（DIRECT 规则）能成功，说明 App 的下载链路本身没问题。
+
+**取证**（2026-11-20，HUAWEI Pura X Max / API 26，用内核控制器对 DIRECT 出口做带目标的探测）：
+
+| 目标 | 结果 |
+|---|---|
+| `raw.githubusercontent.com`（原文） | 504 Timeout |
+| `cdn.jsdelivr.net` | 504 Timeout |
+| `raw.gitmirror.com` | 503 delay test error |
+| `ghproxy.net` + 原 URL | **200，约 150 ms** |
+
+同时：系统浏览器打开同一条 raw 链接也是「网站暂无响应」；对当前代理节点做带目标的延迟测试，`gstatic` 209 ms 正常，`google` 与 `raw.githubusercontent` 都是 503。⇒ 既不是 App 也不是隧道，而是**当前出口到不了 GitHub**。
+
+**改动**（`services/SubscriptionService.ets`）：`updateProfile()` 不再只试原地址，按候选列表依次尝试，任一成功即采用：
+
+1. 原地址；
+2. `https://ghproxy.net/<原地址>`；
+3. `https://ghfast.top/<原地址>`；
+4. `https://cdn.jsdelivr.net/gh/<owner>/<repo>@<branch>/<path>`（由 raw 地址推导）。
+
+只对 `https://raw.githubusercontent.com/...` 展开镜像候选，其它域名保持原样；成功提示写明走了哪个镜像。新增 `mirrorCandidates()` / `toJsDelivr()` / `fetchWithMirrors()` / `mirrorLabel()`。
+
+**验证**：VPN 已连接、直连 raw 仍然超时的情况下导入
+`https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/clash.yml`，日志显示
+`订阅已更新，保存 370 个节点（原地址不通，已改用镜像 ghproxy.net 下载），运行配置已准备`。
+
+**附带提醒**：镜像只能解决「拿不到文件」，不能解决「URL 本身写错」。导入前确认地址指向具体文件
+（`/main/sub` 这类），只写到仓库或目录时服务器会返回 404。
