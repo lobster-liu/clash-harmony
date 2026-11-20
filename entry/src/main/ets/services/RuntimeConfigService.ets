@@ -5,6 +5,8 @@ import { ClashProfile, ProfileState } from '../models/Profile';
 import { CoreService } from './CoreService';
 import { ConvertedSubscription, GenericSubscriptionConverterService } from './GenericSubscriptionConverterService';
 import { ProfileStore } from './ProfileStore';
+import { GeoDataService, GeoDataResult } from './GeoDataService';
+import { RuleTemplateResult, RuleTemplateService } from './RuleTemplateService';
 
 const RUNTIME_DIR_NAME: string = 'runtime';
 const RUNTIME_CONFIG_NAME: string = 'current.yaml';
@@ -45,13 +47,19 @@ export class RuntimeConfigService {
 
       const runtimeDir: string = `${context.filesDir}/${RUNTIME_DIR_NAME}`;
       await RuntimeConfigService.ensureDir(runtimeDir);
+      const geo: GeoDataResult = await GeoDataService.ensure(context);
+      const normalized: string = await RuntimeConfigService.normalize(resolved.text);
+      const template: RuleTemplateResult = RuleTemplateService.apply(normalized);
+      const baseText: string = template.ok ? template.yaml : normalized;
       const runtimePath: string = `${runtimeDir}/${RUNTIME_CONFIG_NAME}`;
-      const runtimeText: string = await RuntimeConfigService.normalize(resolved.text);
+      const runtimeText: string = baseText.endsWith('\n') ? baseText : `${baseText}\n`;
       await RuntimeConfigService.writeText(runtimePath, runtimeText);
 
       return {
         ok: true,
-        message: `运行配置已生成：${current.name}`,
+        message: template.ok
+          ? `运行配置已生成：${current.name}（${template.message}${geo.copied.length > 0 ? '，' + geo.message : ''}）`
+          : `运行配置已生成：${current.name}（未应用内置分流规则：${template.message}）`,
         configPath: runtimePath,
         profileName: current.name,
         nodeCount: converted.ok && converted.nodeCount > 0 ? converted.nodeCount : current.nodeCount,
@@ -76,7 +84,13 @@ export class RuntimeConfigService {
       'mode: rule',
       'log-level: info',
       'external-controller: 127.0.0.1:9090',
-      'secret: ""'
+      'secret: ""',
+      'geodata-mode: true',
+      'geo-auto-update: false',
+      'unified-delay: true',
+      'tcp-concurrent: true',
+      'find-process-mode: "off"',
+      'global-client-fingerprint: chrome'
     ];
     const dns: string[] = [
       'dns:',
@@ -110,11 +124,19 @@ export class RuntimeConfigService {
       'mode',
       'log-level',
       'external-controller',
-      'secret'
+      'secret',
+      'geodata-mode',
+      'geo-auto-update',
+      'unified-delay',
+      'tcp-concurrent',
+      'find-process-mode',
+      'global-client-fingerprint'
     ];
     const managedBlockKeys: string[] = [
       'dns',
-      'hosts'
+      'hosts',
+      'proxy-groups',
+      'rules'
     ];
     const lines: string[] = text.split('\n');
     const kept: string[] = [];

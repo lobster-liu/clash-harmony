@@ -92,7 +92,7 @@ export default class ClashVpnExtensionAbility extends VpnExtensionAbility {
   }
 
   private async markControllerReadyInVpnProcess(): Promise<void> {
-    const controllerReady: ControllerStatus = await MihomoControllerService.waitForVersion(10, 300);
+    const controllerReady: ControllerStatus = await MihomoControllerService.waitForVersion(20, 500);
     if (controllerReady.available) {
       const readyState: CoreBridgeState = CoreBridgeService.markControllerReady(true, controllerReady.version);
       hilog.info(DOMAIN, TAG, 'Controller ready: controllerVersion=%{public}s adapter=%{public}s adapterVersion=%{public}s nativeFd=%{public}d realReady=%{public}s forwarderActive=%{public}s',
