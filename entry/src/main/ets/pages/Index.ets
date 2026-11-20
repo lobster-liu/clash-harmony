@@ -2806,7 +2806,11 @@ struct Index {
   private getSubtitle(): string {
     if (this.showSettings) { return 'VPN · DNS · 核心' }
     if (this.currentTab === 'proxies') {
-      return this.profileState.currentUid.length > 0 ? '节点列表 · 等待核心同步' : '请先导入配置'
+      if (this.profileState.currentUid.length === 0) { return '请先导入配置' }
+      if (this.proxyGroups.length > 0) {
+        return `节点列表 · ${this.proxyNodes.length} 个节点 · ${this.proxyGroups.length} 个分组`
+      }
+      return '节点列表 · 等待核心同步'
     }
     if (this.currentTab === 'profiles') { return `${this.profileState.items.length} 个配置` }
     if (this.currentTab === 'diagnostics') {
