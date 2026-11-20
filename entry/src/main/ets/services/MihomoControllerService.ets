@@ -136,6 +136,18 @@ export class MihomoControllerService {
     );
   }
 
+  /**
+   * 测组内**所有**节点：返回 `{"节点名": 延迟, ...}`。
+   * 组自身刚建好、还没跑完 url-test 时 `/proxies/<组>/delay` 会失败，
+   * 这时可以退到本接口挑一个真正可达的节点。
+   */
+  static async testGroupDelay(groupName: string, timeoutMs: number = 5000, url: string = 'https://www.gstatic.com/generate_204'): Promise<ControllerTextResult> {
+    const path: string = `/group/${MihomoControllerService.encodePathSegment(groupName)}/delay?timeout=${timeoutMs}&url=${MihomoControllerService.encodeQueryValue(url)}`;
+    return MihomoControllerService.toTextResult(
+      await MihomoControllerService.requestText(path, http.RequestMethod.GET, '', timeoutMs + 4000)
+    );
+  }
+
   static async getConnections(): Promise<ControllerTextResult> {
     return MihomoControllerService.toTextResult(
       await MihomoControllerService.requestText('/connections', http.RequestMethod.GET, '')

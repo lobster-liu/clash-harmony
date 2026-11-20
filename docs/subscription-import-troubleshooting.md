@@ -224,3 +224,41 @@ applyConfig ParseWithPath error: proxy 262: create WireGuard device: gVisor is n
 - 用户报的 URL `https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/clash.yml`：修复前 `0 个节点 / 未下载`；修复后日志 `订阅已更新，保存 378 个节点，运行配置已准备`，`files/runtime/current.yaml` 里 `proxies` 377 条（剔掉 1 个 WireGuard）、`proxy-groups` 35 个（29 个 select + 6 个 url-test）、`rules` 34 条，无 `type: select` 混进 proxies、无 `rule-providers`。
 - 连接后 `MihomoStart success`，`/proxies` 中 `🌐 Default -> ♻️ 自动选择`；在此状态下再导入同一条 GitHub 订阅仍然成功（说明流量确实走了隧道）。
 
+## 10. 连上之后首页误报「节点不可达」（探测校准）
+
+**症状**：隧道已经建立、上网正常，首页却显示
+
+```
+已连接 · 1.10.0 · ♻️ 自动选择 不可达 · 请在代理页重新测速并切换节点
+```
+
+或者把组名当节点名报出来：`已连接 · 1.10.0 · 🌐 Default 可达 217 ms（☁️ cloudflare 内的可用节点）`。
+
+**根因一：测的对象不是节点。** `findRuntimeProxyGroup()` 拿到的是「实际承载流量」的那个组（应用组，如 `☁️ cloudflare`），而它的 `now` 往往指向**另一个组**：
+
+```
+☁️ cloudflare -> 🌐 Default -> ♻️ 自动选择 -> 🇯🇵 日本 | JPN 4
+```
+
+`/proxies/<组名>/delay` 对组也会返回结果，但前提是这个组的 url-test 已经跑过一轮；刚连上时跑 `/proxies/♻️ 自动选择/delay` 常常直接失败，于是判定「不可达」——而真实节点是好的。
+
+**根因二：只测一次就下结论。** 原实现 `measureProxyNodeDelay()` 失败即返回 -1，`verifySelectedProxyAfterConnection()` 立刻写「不可达」。
+
+**修复**（`pages/Index.ets`、`services/MihomoControllerService.ets`）：
+
+1. `resolveEffectiveNodeName(start)`：沿 `proxyGroups[].now` 最多下钻 8 层，直到拿到真正的节点名；
+2. `measureProxyNodeDelayWithRetry(name, 3)`：失败间隔 1.5 秒重试，给 url-test 一点时间；
+3. `pickReachableNodeInGroup(groupName)`：仍失败则调内核 `/group/<name>/delay` 把组内全部成员测一遍，取最小正值；若最佳条目本身还是组，再 `resolveEffectiveNodeName` 下钻并重测一次叶子；
+4. 文案统一成 `已连接 · <版本> · 当前节点可达 <N> ms（<节点名>）`，失败才提示「隧道已建立但当前节点不可达」。
+
+**控制器证据**（`hdc fport tcp:19101 tcp:9090`）：
+
+```
+GET /proxies/♻️ 自动选择/delay?timeout=5000&url=https://www.gstatic.com/generate_204  -> 200 {"delay":221}   (1.8s)
+GET /group/♻️ 自动选择/delay?timeout=5000&url=https://www.gstatic.com/generate_204     -> 200 (47 条全部 >0)
+```
+
+即接口本身没问题，问题在「调用时机」和「测错对象」。
+
+**验证**：重建装机后点「连接」，首页显示 `已连接 · 1.10.0 · 5 连接 · 🇯🇵 日本 | JPN 4 70 ms`——报的是真实叶子节点与实测延迟，不再出现「组名 + 不可达」。
+

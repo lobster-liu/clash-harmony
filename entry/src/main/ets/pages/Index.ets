@@ -40,6 +40,11 @@ interface ProxyNode {
   port?: number;
 }
 
+interface ReachableNode {
+  name: string;
+  delay: number;
+}
+
 interface ProxyDelayState {
   delay: string;
   status: string;
@@ -2488,36 +2493,120 @@ struct Index {
     return -1;
   }
 
+  private async measureProxyNodeDelayWithRetry(name: string, attempts: number): Promise<number> {
+    // 刚连上时核心还没跑完 url-test，第一次测经常直接失败，重试两次再下结论
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const delay: number = await this.measureProxyNodeDelay({
+        name: name,
+        meta: '',
+        delay: '待测',
+        selected: true
+      });
+      if (delay > 0) {
+        return delay;
+      }
+      if (attempt + 1 < attempts) {
+        await this.waitForUiUpdate(1500);
+      }
+    }
+    return -1;
+  }
+
+  private resolveEffectiveNodeName(start: string): string {
+    let name: string = start;
+    for (let depth = 0; depth < 8; depth++) {
+      let next: string = '';
+      for (let index = 0; index < this.proxyGroups.length; index++) {
+        if (this.proxyGroups[index].name === name) {
+          next = this.proxyGroups[index].now;
+          break;
+        }
+      }
+      if (next.length === 0 || next === name) {
+        return name;
+      }
+      name = next;
+    }
+    return name;
+  }
+
+  private async pickReachableNodeInGroup(groupName: string): Promise<ReachableNode | undefined> {
+    for (let urlIndex = 0; urlIndex < DELAY_TEST_URLS.length; urlIndex++) {
+      const result: ControllerTextResult =
+        await MihomoControllerService.testGroupDelay(groupName, DELAY_TEST_TIMEOUT_MS, DELAY_TEST_URLS[urlIndex]);
+      if (!result.ok) {
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(result.raw) as Record<string, number>;
+        const names: string[] = Object.keys(parsed);
+        let bestName: string = '';
+        let bestDelay: number = 0;
+        for (let index = 0; index < names.length; index++) {
+          const value: number = parsed[names[index]];
+          if (value > 0 && (bestDelay === 0 || value < bestDelay)) {
+            bestName = names[index];
+            bestDelay = value;
+          }
+        }
+        if (bestName.length > 0) {
+          return { name: bestName, delay: bestDelay };
+        }
+      } catch (err) {
+      }
+    }
+    return undefined;
+  }
+
   private async verifySelectedProxyAfterConnection(controllerVersion: string): Promise<void> {
     const group: ProxyGroupInfo | undefined = this.findRuntimeProxyGroup();
-    const nodeName: string = group && group.now.length > 0 ? group.now : this.getSelectedProxyNodeName();
-    if (nodeName.length === 0) {
+    const selection: string = group && group.now.length > 0 ? group.now : this.getSelectedProxyNodeName();
+    if (selection.length === 0) {
       this.clearProxyHealthState();
       this.statusMessage = `已连接 · ${controllerVersion} · 未找到当前节点`;
       this.recordLog('warn', this.statusMessage);
       return;
     }
 
-    this.statusMessage = `VPN 隧道已建立，正在检测当前节点：${nodeName}`;
+    // 组现在指向的常常是另一个组（🌐 Default → ♻️ 自动选择 → 某个节点），
+    // 测「组」本身在 url-test 还没跑完时必然失败，所以先解析到真正的节点再测。
+    const effective: string = this.resolveEffectiveNodeName(selection);
+    const label: string = effective === selection ? effective : `${selection} → ${effective}`;
+    this.statusMessage = `VPN 隧道已建立，正在检测当前节点：${label}`;
     this.syncHomeRuntimeFields();
-    const delay: number = await this.measureProxyNodeDelay({
-      name: nodeName,
-      meta: '',
-      delay: '待测',
-      selected: true
-    });
+
+    let delay: number = await this.measureProxyNodeDelayWithRetry(effective, 3);
+    let reportedName: string = effective;
+    let reachableInGroup: boolean = false;
+
+    if (delay <= 0 && group) {
+      // 兜底：让内核把组内节点全测一遍，挑一个真正可达的报出来
+      const best: ReachableNode | undefined = await this.pickReachableNodeInGroup(group.name);
+      if (best !== undefined) {
+        // 组内条目本身也可能是组，再往下一层取到真正的节点，界面才不会显示一个组名
+        reportedName = this.resolveEffectiveNodeName(best.name);
+        if (reportedName !== best.name) {
+          const leafDelay: number = await this.measureProxyNodeDelayWithRetry(reportedName, 1);
+          delay = leafDelay > 0 ? leafDelay : best.delay;
+        } else {
+          delay = best.delay;
+        }
+        reachableInGroup = true;
+      }
+    }
 
     this.proxyHealthCheckedAt = Date.now();
-    this.proxyHealthNode = nodeName;
+    this.proxyHealthNode = reportedName;
     this.proxyHealthOk = delay > 0;
     this.proxyHealthDelay = delay > 0 ? delay : 0;
+
     if (delay > 0) {
-      this.statusMessage = `已连接 · ${controllerVersion} · 当前节点可达 ${delay} ms`;
+      this.statusMessage = `已连接 · ${controllerVersion} · 当前节点可达 ${delay} ms（${reportedName}）`;
       this.recordLog('info', this.statusMessage);
       return;
     }
 
-    this.statusMessage = `VPN 隧道已建立，但当前节点不可达：${nodeName} · 请在代理页重新测速并切换节点`;
+    this.statusMessage = `VPN 隧道已建立，但当前节点不可达：${label} · 请在代理页重新测速并切换节点`;
     this.recordLog('warn', this.statusMessage);
   }
 
