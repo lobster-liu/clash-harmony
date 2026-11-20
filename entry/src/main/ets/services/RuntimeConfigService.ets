@@ -136,6 +136,7 @@ export class RuntimeConfigService {
       'dns',
       'hosts',
       'proxy-groups',
+      'rule-providers',
       'rules'
     ];
     const lines: string[] = text.split('\n');
@@ -163,6 +164,11 @@ export class RuntimeConfigService {
 
   private static isTopLevelConfigLine(line: string): boolean {
     if (line.length === 0 || line.startsWith(' ') || line.startsWith('\t') || line.startsWith('#')) {
+      return false;
+    }
+    // 顶格的 `- ` 是上一个块的列表续行（订阅里 proxy-groups / rules 常见这种不缩进的写法），
+    // 不能当成新的顶层键，否则删块时会把组和规则留成孤儿条目、被 mihomo 当成代理。
+    if (line.startsWith('- ') || line === '-') {
       return false;
     }
     return line.indexOf(':') > 0;

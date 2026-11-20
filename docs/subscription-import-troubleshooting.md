@@ -162,3 +162,65 @@ currentUid: state.currentUid.length > 0 ? state.currentUid : profile.uid
 4. 顺带把那句误导性文案改成 `「<名字>」是本机配置文件，不能在线更新（只有订阅链接才能下载）`，让人一眼看出打在哪个配置上。
 
 **验证**：修复后在「当前配置 = 本地 32 节点」的状态下导入 `https://node.freeclashnode.com/uploads/2026/11/3-20261120.yaml` → 日志 `info 订阅已更新，保存 14 个节点，运行配置已准备`，配置行显示 `14 个节点 · 已下载` 并标为「当前」，`files/runtime/current.yaml` 里 `proxy-groups` 31 个分组（该订阅节点只落在 US/冷门，故没有 HK/TW/JP/SG 组）、`rules` 34 条。
+
+## 9. 导入成功却连不上：顶格列表项、WireGuard 节点、默认出口
+
+换用别人的机场订阅（`raw.githubusercontent.com/ermaozi/...` 那类由 subconverter 生成的 YAML）时，又踩到三个叠加的问题，症状都是「导入成功、有节点数，但页面提示核心未响应或节点全不可达」。
+
+### 9.1 顶格的 `- ` 列表项把分组条目留成了孤儿
+
+这类订阅的列表**不缩进**，`proxies:` / `proxy-groups:` / `rules:` 三个键下面的条目都顶格写：
+
+```yaml
+proxies:
+- name: ...
+proxy-groups:
+- name: ermao.net | 🚀 节点选择
+  type: select
+rules:
+- MATCH,Proxy
+```
+
+`RuntimeConfigService.removeManagedTopLevelKeys()` 判断「块结束」用的是 `isTopLevelConfigLine()`（顶格且含冒号）。顶格的 `- name: ...` 恰好满足条件，于是删到 `proxy-groups:` 这一行就停了，**它下面的组条目全被留下**，紧接着 proxies 段落，最后被 mihomo 当成代理条目：
+
+```
+applyConfig ParseWithPath error: proxy 377: unsupport proxy type: select
+```
+
+同一个原因也让 `ClashConfigParserService.parseProxyNodes()` 读不到节点（`- type: vless` 顶格被当成新的顶层键、`inProxies` 被关掉），于是 `RuleTemplateService.apply()` 返回 `ok:false`，运行配置里**没有 proxy-groups / rules**，只有一堆裸节点。
+
+**修复**：
+
+1. `RuntimeConfigService.isTopLevelConfigLine()` 里把顶格的 `- ` / `-` 视为「上一个块的列表续行」，不算新顶层键；`managedBlockKeys` 加上 `rule-providers`（订阅自带但本模板不用，留着会触发内核去拉远程规则集）。
+2. `ClashConfigParserService.parseProxyNodes()` 把「列表项」判断提到「顶层键」判断之前（`inProxies && trimmed.startsWith('- ')`），顶格与缩进两种写法都能读。
+
+### 9.2 WireGuard 节点让整份配置解析失败
+
+同一个订阅里混了 `type: wireguard` 节点，随包内核没有编译 gVisor：
+
+```
+applyConfig ParseWithPath error: proxy 262: create WireGuard device: gVisor is not included in this build, rebuild with -tags with_gvisor
+```
+
+一个节点就能让**整份配置**失败（不是跳过该节点），用户看到的是「连接」直接报「核心未响应：无法连接 127.0.0.1:9090」。
+
+**修复**：`RuleTemplateService.filterUnsupportedProxies()` 在生成运行配置时按条目剔除 `wireguard` / `wg` / `tailscale` 节点，并在成功文案里说明（`已跳过 N 个不受支持的节点（wireguard：随包内核未编译对应出站）`）。条目切分按「同级第一个条目的缩进」判定，避免把 `peers:` 下面的嵌套列表误当成新条目。
+
+### 9.3 默认出口钉在地区组上，那个地区全挂就全挂
+
+模板最初按笔记把 `🌐 Default` 写成「五区 → 冷门 → 自动 → 全部 → DIRECT」，首位是地区组。机场若某个地区的节点全部超时，`🌐 Default`（以及末尾挂 `🌐 Default` 的应用组）就整体不可用，表现是「隧道已建立但节点不可达」，而 `♻️ 自动选择` 明明是通的。
+
+**修复**：`🌐 Default` 与 22 个应用组都把 `♻️ 自动选择`（url-test，会自己挑最快且能连通的节点）放到首位，地区组作为可选项排在后面。
+
+### 9.4 顺带：订阅域名被墙时，先连 VPN 再导入
+
+`raw.githubusercontent.com` 在这台手机的网络下直连不通（用系统浏览器打开同样「网站暂无响应」，所以不是 App 的问题）。此时：
+
+- 请求参数加 `addressFamily: http.AddressFamily.ONLY_V4`——本工程的 TUN 只有 IPv4（`isIPv6Accepted: false`），手机在蜂窝网下却有原生 IPv6，域名带 AAAA 时请求会绕过隧道直出、被拦掉；
+- 下载失败时按错误码给出可执行提示（`2300006` 解析失败 / `2300007` 连接被拒 / `2300999` 请求未完成 → 先连 VPN，或用「本地文件」导入）。
+
+### 9.5 验证
+
+- 用户报的 URL `https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/clash.yml`：修复前 `0 个节点 / 未下载`；修复后日志 `订阅已更新，保存 378 个节点，运行配置已准备`，`files/runtime/current.yaml` 里 `proxies` 377 条（剔掉 1 个 WireGuard）、`proxy-groups` 35 个（29 个 select + 6 个 url-test）、`rules` 34 条，无 `type: select` 混进 proxies、无 `rule-providers`。
+- 连接后 `MihomoStart success`，`/proxies` 中 `🌐 Default -> ♻️ 自动选择`；在此状态下再导入同一条 GitHub 订阅仍然成功（说明流量确实走了隧道）。
+

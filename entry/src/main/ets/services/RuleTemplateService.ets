@@ -22,6 +22,15 @@ interface AppGroup {
   reject: boolean;
 }
 
+interface ProxyFilterResult {
+  text: string;
+  dropped: number;
+  droppedTypes: string[];
+}
+
+/** 随包内核没编译 gVisor / 相应出站，遇到这些类型的节点会让整份配置解析失败。 */
+const UNSUPPORTED_PROXY_TYPES: string[] = ['wireguard', 'wg', 'tailscale'];
+
 const G_ALL: string = '🧭 全部节点';
 const G_AUTO: string = '♻️ 自动选择';
 const G_MANUAL: string = '🚀 手动选择';
@@ -72,8 +81,10 @@ export class RuleTemplateService {
   ];
 
   static apply(profileYaml: string): RuleTemplateResult {
-    const proxies: string = RuleTemplateService.block(profileYaml, 'proxies');
-    const nodes: ParsedProxyNode[] = ClashConfigParserService.parseProxyNodes(profileYaml);
+    const filtered: ProxyFilterResult = RuleTemplateService.filterUnsupportedProxies(profileYaml);
+    const source: string = filtered.text;
+    const proxies: string = RuleTemplateService.block(source, 'proxies');
+    const nodes: ParsedProxyNode[] = ClashConfigParserService.parseProxyNodes(source);
     if (proxies.length === 0 || nodes.length === 0) {
       return {
         ok: false,
@@ -87,7 +98,7 @@ export class RuleTemplateService {
     const regions: RegionRule[] = RuleTemplateService.classify(nodes);
     const groups: string[] = RuleTemplateService.buildGroups(nodes, regions);
     const rules: string[] = RuleTemplateService.buildRules();
-    const body: string = profileYaml.replace(/\s+$/, '');
+    const body: string = source.replace(/\s+$/, '');
 
     const sections: string[] = [
       body,
@@ -95,12 +106,16 @@ export class RuleTemplateService {
       `rules:\n${rules.join('\n')}`
     ];
 
+    const skipped: string = filtered.dropped > 0
+      ? `，已跳过 ${filtered.dropped} 个不受支持的节点（${filtered.droppedTypes.join('/')}：随包内核未编译对应出站）`
+      : '';
+
     return {
       ok: true,
       yaml: sections.join('\n\n'),
       groupCount: groups.length,
       ruleCount: rules.length,
-      message: `已生成 ${groups.length} 个分组、${rules.length} 条规则`
+      message: `已生成 ${groups.length} 个分组、${rules.length} 条规则${skipped}`
     };
   }
 
@@ -141,6 +156,111 @@ export class RuleTemplateService {
     return names;
   }
 
+  /**
+   * 去掉内核不支持的出站类型：一个 wireguard 节点就会让整份配置
+   * `ParseWithPath` 失败（`gVisor is not included in this build`），
+   * 而用户看到的是「导入成功但连不上」。
+   */
+  private static filterUnsupportedProxies(body: string): ProxyFilterResult {
+    const lines: string[] = body.split('\n');
+    const kept: string[] = [];
+    const droppedTypes: string[] = [];
+    let dropped: number = 0;
+    let inProxies: boolean = false;
+    let itemIndent: number = -1;
+    let index: number = 0;
+
+    while (index < lines.length) {
+      const line: string = lines[index];
+      const trimmed: string = line.trim();
+      const topLevel: boolean = line.length > 0 && !line.startsWith(' ') && !line.startsWith('\t');
+
+      if (!inProxies) {
+        if (topLevel && trimmed === 'proxies:') {
+          inProxies = true;
+        }
+        kept.push(line);
+        index++;
+        continue;
+      }
+
+      const indent: number = RuleTemplateService.dashIndent(line);
+      if (indent >= 0) {
+        // 以「同级第一个条目的缩进」为界：条目内部的嵌套列表（peers 等）缩进更深，不算新条目。
+        if (itemIndent < 0) {
+          itemIndent = indent;
+        }
+        if (indent === itemIndent) {
+          let end: number = index + 1;
+          while (end < lines.length) {
+            const next: string = lines[end];
+            const nextTrimmed: string = next.trim();
+            const nextTop: boolean = next.length > 0 && !next.startsWith(' ') && !next.startsWith('\t');
+            if (nextTop && !nextTrimmed.startsWith('- ')) {
+              break;
+            }
+            if (RuleTemplateService.dashIndent(next) === itemIndent) {
+              break;
+            }
+            end++;
+          }
+          const type: string = RuleTemplateService.itemType(lines, index, end);
+          const normalized: string = type.toLowerCase();
+          if (UNSUPPORTED_PROXY_TYPES.indexOf(normalized) >= 0) {
+            dropped++;
+            if (droppedTypes.indexOf(normalized) < 0) {
+              droppedTypes.push(normalized);
+            }
+          } else {
+            for (let cursor: number = index; cursor < end; cursor++) {
+              kept.push(lines[cursor]);
+            }
+          }
+          index = end;
+          continue;
+        }
+      }
+
+      if (topLevel) {
+        inProxies = false;
+        itemIndent = -1;
+      }
+      kept.push(line);
+      index++;
+    }
+
+    return { text: kept.join('\n'), dropped: dropped, droppedTypes: droppedTypes };
+  }
+
+  private static dashIndent(line: string): number {
+    let index: number = 0;
+    while (index < line.length && line.charAt(index) === ' ') {
+      index++;
+    }
+    if (index + 1 < line.length && line.charAt(index) === '-' && line.charAt(index + 1) === ' ') {
+      return index;
+    }
+    return -1;
+  }
+
+  private static itemType(lines: string[], start: number, end: number): string {
+    for (let index: number = start; index < end; index++) {
+      const trimmed: string = lines[index].trim();
+      const caret: string = trimmed.startsWith('- ') ? trimmed.substring(2).trim() : trimmed;
+      if (!caret.startsWith('type:')) {
+        continue;
+      }
+      let value: string = caret.substring(5).trim();
+      const comma: number = value.indexOf(',');
+      if (comma >= 0) {
+        value = value.substring(0, comma);
+      }
+      value = value.replace(/^["']/, '').replace(/["']$/, '');
+      return value;
+    }
+    return '';
+  }
+
   private static buildGroups(nodes: ParsedProxyNode[], regions: RegionRule[]): string[] {
     const allNames: string[] = [];
     for (let index = 0; index < nodes.length; index++) {
@@ -168,11 +288,12 @@ export class RuleTemplateService {
     manualMembers.push('DIRECT');
     groupLines.push(RuleTemplateService.selectGroup(G_MANUAL, manualMembers));
 
-    const defaultMembers: string[] = [];
+    // 首选项放 ♻️ 自动选择（url-test 会自己挑最快且能连通的节点），地区组排在后面。
+    // 若把某个地区组放在首位，机场里该地区节点全挂时，所有走「🌐 Default」的流量都会一起失败。
+    const defaultMembers: string[] = [G_AUTO];
     for (let index = 0; index < available.length; index++) {
       defaultMembers.push(available[index]);
     }
-    defaultMembers.push(G_AUTO);
     defaultMembers.push(G_ALL);
     defaultMembers.push('DIRECT');
     groupLines.push(RuleTemplateService.selectGroup(G_DEFAULT, defaultMembers));
@@ -190,6 +311,8 @@ export class RuleTemplateService {
       if (app.directFirst) {
         members.push('DIRECT');
       }
+      // 同样把自检组放前面：地区组只是可选项，默认出口不由某个可能全挂的地区决定
+      members.push(G_AUTO);
       for (let a = 0; a < available.length; a++) {
         members.push(available[a]);
       }
@@ -280,15 +403,14 @@ export class RuleTemplateService {
   }
 
   private static scalar(value: string): string {
-    const needsQuote: boolean = value.indexOf(':') >= 0 || value.indexOf('#') >= 0 ||
-      value.indexOf('"') >= 0 || value.indexOf("'") >= 0 ||
-      (value.length > 0 && (value.startsWith(' ') || value.startsWith('{') ||
-        value.startsWith('[') || value.startsWith('&') || value.startsWith('*') ||
-        value.startsWith('!') || value.startsWith('|') || value.startsWith('>')));
-    if (!needsQuote) {
+    // 「@」和反引号是 YAML 的保留首字符（`- @xxx` 会直接让解析器报
+    // “found character that cannot start any token”），`:`/`#`/引号同样危险。
+    // 与其逐个列举，不如只放行「明显安全」的裸串，其余一律加引号。
+    const safe: RegExp = new RegExp('^[A-Za-z0-9\\u00C0-\\uFFFF][A-Za-z0-9\\u00C0-\\uFFFF ._()+\\-]*$');
+    if (value.length > 0 && safe.test(value)) {
       return value;
     }
-    return `"${value.replace(/"/g, '\\"')}"`;
+    return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
   }
 
   private static block(text: string, key: string): string {

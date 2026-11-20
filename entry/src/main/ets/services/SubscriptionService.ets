@@ -14,6 +14,21 @@ export interface SubscriptionUpdateResult {
   state: ProfileState;
 }
 
+// 下载失败时把「下一步该干什么」直接写在提示里：手机在国内直连 GitHub raw 这类域名
+// 往往拿到 2300007（connect 瞬间被拒）或 2300999（内部错误），光给错误码没人看得懂。
+function hintForCode(code: number): string {
+  if (code === 2300006) {
+    return '（域名解析失败：先连接一个可用配置的 VPN 再导入，或换成可直连的订阅地址）';
+  }
+  if (code === 2300007) {
+    return '（连接被拒绝：该域名在当前网络下无法直连，先连接 VPN 再导入，或用「本地文件」导入）';
+  }
+  if (code === 2300999) {
+    return '（请求未完成：先连接 VPN 后再导入，或用「本地文件」导入）';
+  }
+  return '';
+}
+
 const USER_AGENT: string = 'clash-meta/1.19.0 clash-harmony/0.1.0';
 
 export class SubscriptionService {
@@ -103,6 +118,10 @@ export class SubscriptionService {
         readTimeout: 20000,
         connectTimeout: 15000,
         usingCache: false,
+        // 只解析 IPv4：本工程的 VPN 扩展建的 TUN 只有 IPv4（isIPv6Accepted: false），
+        // 手机在蜂窝网下却有原生 IPv6，目标域名带 AAAA 时请求会绕过隧道直出、被墙拦掉
+        // （表现就是 2300999 / 2300007 一把抓，而 PC 上同一个 URL 正常）。
+        addressFamily: http.AddressFamily.ONLY_V4,
         header: {
           'User-Agent': USER_AGENT,
           'Accept': '*/*'
@@ -134,10 +153,11 @@ export class SubscriptionService {
       };
     } catch (err) {
       const error: BusinessError = err as BusinessError;
+      const code: number = typeof error.code === 'number' ? error.code : -1;
       const detail: string = `${error.code !== undefined ? error.code : '未知错误'} · ${error.message !== undefined ? error.message : ''}`;
       return {
         ok: false,
-        message: `订阅下载失败（${detail}）`,
+        message: `订阅下载失败（${detail}）${hintForCode(code)}`,
         text: ''
       };
     } finally {

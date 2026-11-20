@@ -28,6 +28,8 @@ Clash Harmony 是一个 HarmonyOS / ArkTS Stage 工程，用于在鸿蒙设备�
 
 **改动**：每次生成运行配置时，`RuleTemplateService` 保留订阅里的 `proxies`，丢弃订阅自带的 `proxy-groups` / `rules` / `dns` / `hosts`，改按自定义规则 A 重建分组与规则——36 个分组（全部节点、自动选择、按节点名关键词归类的五区 url-test、冷门节点、手动选择、Default、漏网之鱼、非标端口 + 22 个应用组），34 条规则（adobe → 私网 → 国内直连 → 应用组 → gfw → 非标端口 → `MATCH`）。「非标端口」原来依赖远程 rule-provider `Custom_Port_Direct.yaml`，这里内联成三条等价的 `DST-PORT` 区间规则（除 80/443 之外全部走 `🔀 非标端口` 组），省掉运行期下载规则集这个新的失败点。`GeoDataService` 把随包的 `geosite.dat` / `geoip.dat` 落盘到 mihomo 的 home 目录（`files/runtime`），所以清数据、升级之后不必手工推文件，并开启 `geodata-mode`。顺带把「带 geo 数据后起核要 3 秒、界面只等 1.6 秒就把刚起来的核杀掉」的超时也调对了。
 
+换用第三方机场订阅（subconverter 生成、列表顶格不缩进那类）后又暴露三个连带问题，一并修了：① 顶格的 `- ` 列表项被当成新的顶层键，删订阅自带分组时只删了 `proxy-groups:` 这一行、把组条目留成了孤儿（`unsupport proxy type: select`），解析器也因此读不到节点、生成不出分组——现在两个解析器都按「列表项优先」处理；② 订阅里混一个 `type: wireguard` 节点就足以让整份配置解析失败（随包内核没有 gVisor），生成运行配置时直接剔除并提示跳过了几个；③ `🌐 Default` 与应用组的首位从「某个地区组」换成 `♻️ 自动选择`，避免机场某地区节点全挂时所有走兜底的流量一起失败。另外给订阅请求加了 `addressFamily: ONLY_V4`（TUN 只有 IPv4，蜂窝网的 IPv6 会绕过隧道），并按错误码给出「先连 VPN 再导入 / 改用本地文件」这类可执行提示。
+
 ### 4. 界面高亮不跟随点击
 
 **现象**：诊断页点「日志 / 规则 / DNS」，下面内容换了但高亮不动；代理页切换分组、配置页切换导入入口同样是「点了没反应」，后来还出现过两个按钮同时高亮。

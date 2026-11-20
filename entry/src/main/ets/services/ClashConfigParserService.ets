@@ -62,6 +62,20 @@ export class ClashConfigParserService {
         continue;
       }
 
+      // 列表项有时与 proxies: 顶格对齐（列 0），必须先按「条目」处理：
+      // 否则会被当成新的顶层键、把 inProxies 关掉，最后一个节点都读不到
+      // （表现就是「导入成功、有节点数，但运行配置里没有分流分组」）。
+      if (inProxies && trimmed.startsWith('- ')) {
+        ClashConfigParserService.pushNode(nodes, currentName, currentType, currentUdp, currentServer, currentPort);
+        currentName = ClashConfigParserService.readInlineValue(trimmed, 'name');
+        currentType = ClashConfigParserService.readInlineValue(trimmed, 'type');
+        currentUdp = ClashConfigParserService.readInlineValue(trimmed, 'udp') === 'true';
+        currentServer = ClashConfigParserService.readInlineValue(trimmed, 'server');
+        const portStr: string = ClashConfigParserService.readInlineValue(trimmed, 'port');
+        currentPort = portStr.length > 0 ? parseInt(portStr) : 0;
+        continue;
+      }
+
       if (!rawLine.startsWith(' ') && !rawLine.startsWith('\t')) {
         if (inProxies) {
           ClashConfigParserService.pushNode(nodes, currentName, currentType, currentUdp, currentServer, currentPort);
@@ -76,17 +90,6 @@ export class ClashConfigParserService {
       }
 
       if (!inProxies) {
-        continue;
-      }
-
-      if (trimmed.startsWith('- ')) {
-        ClashConfigParserService.pushNode(nodes, currentName, currentType, currentUdp, currentServer, currentPort);
-        currentName = ClashConfigParserService.readInlineValue(trimmed, 'name');
-        currentType = ClashConfigParserService.readInlineValue(trimmed, 'type');
-        currentUdp = ClashConfigParserService.readInlineValue(trimmed, 'udp') === 'true';
-        currentServer = ClashConfigParserService.readInlineValue(trimmed, 'server');
-        const portStr: string = ClashConfigParserService.readInlineValue(trimmed, 'port');
-        currentPort = portStr.length > 0 ? parseInt(portStr) : 0;
         continue;
       }
 
