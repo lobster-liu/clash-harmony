@@ -216,10 +216,27 @@ struct Index {
     const state: ProfileState = await ProfileStore.load(context);
     this.runtimeConfigPath = RuntimeConfigService.getRuntimeConfigPath(context);
     this.applyProfileState(state);
+    await this.cleanOrphanTunnelIfNeeded();
     await this.refreshProxyNodes(state);
     await this.resumeRuntimeIfControllerAvailable();
     hilog.info(LOG_DOMAIN, LOG_TAG, 'Profiles loaded: %{public}d items, currentUid=%{public}s',
       state.items.length, state.currentUid);
+  }
+
+  // 上一次进程被强杀/崩溃时，系统里可能留下 vpn-tun 隧道；它会把本应用的出网请求
+  // 全部吞进隧道，表现为订阅下载 2300007、任何 URL 都连不上。
+  private async cleanOrphanTunnelIfNeeded(): Promise<void> {
+    if (this.isRuntimeConnected()) {
+      return;
+    }
+    const cleared: boolean = await VpnService.clearOrphanTunnel();
+    if (cleared) {
+      const message: string = VpnService.tunnelPresent()
+        ? '检测到残留 VPN 隧道且无法自动清理，请重启手机后再试'
+        : '检测到残留 VPN 隧道，已自动清理';
+      this.statusMessage = message;
+      this.recordLog(VpnService.tunnelPresent() ? 'warn' : 'info', message);
+    }
   }
 
   private async toggleVpn(): Promise<void> {
@@ -286,7 +303,7 @@ struct Index {
         this.vpnTunnelActive = false;
         this.clearProxyHealthState();
         this.summary = CoreService.createSummary(this.profileState, false);
-        this.statusMessage = 'VPN 启动失败：模拟器可能不支持 VPN Extension，请使用真机';
+        this.statusMessage = 'VPN 启动失败：系统未建立隧道（请检查是否已允许「使用 VPN」后重试）';
         this.recordLog('warn', this.statusMessage);
         return;
       }
@@ -294,7 +311,7 @@ struct Index {
       this.statusMessage = 'VPN 已启动，等待核心...';
       this.coreBridgeState = CoreBridgeService.getState();
       hilog.info(LOG_DOMAIN, LOG_TAG, 'toggleVpn: waiting for controller');
-      const controllerReady: ControllerStatus = await MihomoControllerService.waitForVersion(3, 800);
+      const controllerReady: ControllerStatus = await MihomoControllerService.waitForVersion(20, 700);
       this.controllerStatus = controllerReady;
       hilog.info(LOG_DOMAIN, LOG_TAG, 'toggleVpn: controller ready=%{public}s', controllerReady.available ? 'true' : 'false');
 
@@ -423,6 +440,15 @@ struct Index {
   }
 
   private applyProfileState(state: ProfileState): void {
+    // 隧道被下载逻辑临时断开后，界面上的「已连接」状态要跟着回落。
+    if (this.vpnTunnelActive && !VpnService.tunnelPresent()) {
+      TrafficPollerService.stop();
+      this.stopHomeRefreshLoop();
+      this.connectedAt = 0;
+      this.vpnTunnelActive = false;
+      this.vpnActionText = '连接';
+      this.coreBridgeState = CoreBridgeService.markControllerReady(false, '');
+    }
     const connected: boolean = this.isRuntimeConnected();
     const current: ClashProfile | undefined = CoreService.getCurrentProfile(state);
     this.profileState = state;
@@ -2049,6 +2075,12 @@ struct Index {
           }
         }
         .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#DBE3EF' })
+
+        if (this.statusMessage.length > 0) {
+          Text(this.statusMessage)
+            .width('100%').fontSize(12).fontColor('#475569').textAlign(TextAlign.Center)
+            .padding({ top: 4, bottom: 4 })
+        }
       }
       .padding(16)
     }

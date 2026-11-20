@@ -1,16 +1,20 @@
 import { common } from '@kit.AbilityKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { http } from '@kit.NetworkKit';
 import { ClashProfile, ProfileState } from '../models/Profile';
 import { ClashConfigParserService, ParsedProxyNode } from './ClashConfigParserService';
 import { ConvertedSubscription, GenericSubscriptionConverterService } from './GenericSubscriptionConverterService';
 import { ProfileStore } from './ProfileStore';
+import { VpnService } from './VpnService';
 
 export interface SubscriptionUpdateResult {
   ok: boolean;
   message: string;
   state: ProfileState;
 }
+
+const USER_AGENT: string = 'clash-meta/1.19.0 clash-harmony/0.1.0';
 
 export class SubscriptionService {
   static async updateProfile(context: common.Context, uid: string): Promise<SubscriptionUpdateResult> {
@@ -31,11 +35,22 @@ export class SubscriptionService {
       };
     }
 
-    const payload: FetchResult = await SubscriptionService.fetchText(profile.source);
+    // 先按常规下载；只有当默认网络被自己的 VPN 隧道接管、请求又被隧道拒绝时，
+    // 才临时断开隧道重试一次（隧道内没有可用节点时就是这种表现：2300007）。
+    let releasedTunnel: boolean = false;
+    let payload: FetchResult = await SubscriptionService.fetchText(profile.source);
+    if (!payload.ok && VpnService.tunnelPresent()) {
+      releasedTunnel = await VpnService.releaseTunnelForDownload();
+      if (releasedTunnel) {
+        payload = await SubscriptionService.fetchText(profile.source);
+      }
+    }
     if (!payload.ok) {
       return {
         ok: false,
-        message: payload.message,
+        message: releasedTunnel
+          ? `${payload.message}（已临时断开本机 VPN 隧道后仍失败，请检查 URL 或节点可用性）`
+          : payload.message,
         state: state
       };
     }
@@ -62,9 +77,10 @@ export class SubscriptionService {
     };
     const nextState: ProfileState = await ProfileStore.replace(context, nextProfile);
 
+    const baseMessage: string = converted.converted ? `订阅已转换，保存 ${nextProfile.nodeCount} 个节点` : `订阅已更新，保存 ${nextProfile.nodeCount} 个节点`;
     return {
       ok: true,
-      message: converted.converted ? `订阅已转换，保存 ${nextProfile.nodeCount} 个节点` : `订阅已更新，保存 ${nextProfile.nodeCount} 个节点`,
+      message: releasedTunnel ? `${baseMessage}（下载时已临时断开 VPN，请重新点「连接」）` : baseMessage,
       state: nextState
     };
   }
@@ -84,9 +100,13 @@ export class SubscriptionService {
       const response: http.HttpResponse = await request.request(url, {
         method: http.RequestMethod.GET,
         expectDataType: http.HttpDataType.STRING,
-        readTimeout: 15000,
-        connectTimeout: 8000,
-        usingCache: false
+        readTimeout: 20000,
+        connectTimeout: 15000,
+        usingCache: false,
+        header: {
+          'User-Agent': USER_AGENT,
+          'Accept': '*/*'
+        }
       });
 
       const code: number = response.responseCode as number;
@@ -113,9 +133,11 @@ export class SubscriptionService {
         text: text
       };
     } catch (err) {
+      const error: BusinessError = err as BusinessError;
+      const detail: string = `${error.code !== undefined ? error.code : '未知错误'} · ${error.message !== undefined ? error.message : ''}`;
       return {
         ok: false,
-        message: '订阅下载失败，请检查网络、URL 或证书配置',
+        message: `订阅下载失败（${detail}）`,
         text: ''
       };
     } finally {
