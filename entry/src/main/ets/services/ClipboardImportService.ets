@@ -4,6 +4,7 @@ import { fileIo } from '@kit.CoreFileKit';
 import { ClashProfile, createLocalProfile, createRemoteProfile, ProfileState } from '../models/Profile';
 import { ClashConfigParserService, ParsedProxyNode } from './ClashConfigParserService';
 import { ProfileStore } from './ProfileStore';
+import { SubscriptionService, SubscriptionUpdateResult } from './SubscriptionService';
 
 export interface ClipboardImportResult {
   ok: boolean;
@@ -24,11 +25,23 @@ export class ClipboardImportService {
 
       if (text.startsWith('http://') || text.startsWith('https://')) {
         const name: string = ClipboardImportService.createProfileNameFromUrl(text);
-        const next: ProfileState = await ProfileStore.addRemote(context, createRemoteProfile(name, text));
+        const profile: ClashProfile = createRemoteProfile(name, text);
+        await ProfileStore.addRemote(context, profile);
+        // 与「导入订阅」一致：先把这条订阅下载下来，成功了才切到它；失败也留着条目，
+        // 用户可以在配置页点「更新」重试。
+        const updated: SubscriptionUpdateResult = await SubscriptionService.updateProfile(context, profile.uid);
+        if (!updated.ok) {
+          return {
+            ok: false,
+            message: `已从剪贴板保存订阅 ${name}，但下载失败：${updated.message}`,
+            state: updated.state
+          };
+        }
+        const active: ProfileState = await ProfileStore.activate(context, profile.uid);
         return {
           ok: true,
-          message: `已从剪贴板导入订阅：${name}`,
-          state: next
+          message: `已从剪贴板导入订阅：${name}，${updated.message}`,
+          state: active
         };
       }
 

@@ -134,3 +134,31 @@ if (!payload.ok && VpnService.tunnelPresent()) {
 ## 7. 已知的观感问题（不影响功能）
 
 - 配置页顶部计数（`${items.length} 个配置`）与列表标题（`配置列表 · ${items.length}`）偶尔差 1：两者读同一份状态，属 ArkUI 局部未刷新，切一次 tab 即对齐。
+
+## 8. 导入订阅后「0 个节点」，换台电脑/客户端却正常
+
+**症状**：配置页已经有别的配置（尤其是本地文件导入的那条）并且它是「当前」时，再「导入订阅」一个远程链接，配置行会出现，但一直是 `0 个节点 · 未下载`；诊断日志只有
+
+```
+info 已保存订阅：node.freeclashnode.com，正在下载...
+warn 「profile_share」是本机配置文件，不能在线更新（只有订阅链接才能下载）
+```
+
+同一个 URL 在 PC 上（Clash Verge / mihomo）能正常解析出 14 个节点，所以既不是 URL 的问题，也不是解析器的问题。
+
+**根因**：`ProfileStore.addRemote()` 保留原来的 `currentUid`：
+
+```ts
+currentUid: state.currentUid.length > 0 ? state.currentUid : profile.uid
+```
+
+而 `addRemoteProfile()` 下载时用的是 `SubscriptionService.updateProfile(context, next.currentUid)`——**当前配置**，不是刚加入的那条。当前是本地配置时，`updateProfile()` 在 `profile.type !== 'remote'` 处直接返回失败，于是新订阅一次都没下载过，停在 0 个节点。之前一直没暴露，是因为早期测试时配置列表是空的，`addRemote` 会把新订阅设为当前。
+
+**修复**（`Index.ets`、`services/ClipboardImportService.ets`）：
+
+1. 下载对象改成刚创建的那条：`SubscriptionService.updateProfile(context, profile.uid)`；
+2. 下载**成功后**再 `ProfileStore.activate(context, profile.uid)` 切为当前配置（点「保存」的意图就是要用这份订阅），失败则保留原当前配置、只报错，条目留着可以点「更新」重试；
+3. 「剪贴板」里粘贴订阅 URL 的路径同样处理（原来也是只加条目不下下载）；
+4. 顺带把那句误导性文案改成 `「<名字>」是本机配置文件，不能在线更新（只有订阅链接才能下载）`，让人一眼看出打在哪个配置上。
+
+**验证**：修复后在「当前配置 = 本地 32 节点」的状态下导入 `https://node.freeclashnode.com/uploads/2026/11/3-20261120.yaml` → 日志 `info 订阅已更新，保存 14 个节点，运行配置已准备`，配置行显示 `14 个节点 · 已下载` 并标为「当前」，`files/runtime/current.yaml` 里 `proxy-groups` 31 个分组（该订阅节点只落在 US/冷门，故没有 HK/TW/JP/SG 组）、`rules` 34 条。

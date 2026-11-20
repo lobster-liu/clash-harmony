@@ -535,22 +535,29 @@ struct Index {
     }
     const name: string = this.importName.trim().length > 0 ? this.importName.trim() : this.createProfileNameFromUrl(url);
     const context = getContext(this) as common.Context;
-    const next: ProfileState = await ProfileStore.addRemote(context, createRemoteProfile(name, url));
+    const profile: ClashProfile = createRemoteProfile(name, url);
+    const next: ProfileState = await ProfileStore.addRemote(context, profile);
     this.importUrl = '';
     this.importName = '';
     this.showImportPanel = false;
     this.applyProfileState(next);
     this.statusMessage = `已保存订阅：${name}，正在下载...`;
     this.recordLog('info', this.statusMessage);
-    const updateResult: SubscriptionUpdateResult = await SubscriptionService.updateProfile(context, next.currentUid);
-    this.applyProfileState(updateResult.state);
-    await this.refreshProxyNodes(updateResult.state);
+    // 下载刚加入的这一条，而不是 state.currentUid：当前可能是沙箱或文档里的本地配置，
+    // 那样 updateProfile 只会得到「当前只支持更新远程订阅」，新订阅永远停在 0 个节点。
+    const updateResult: SubscriptionUpdateResult = await SubscriptionService.updateProfile(context, profile.uid);
     if (!updateResult.ok) {
+      this.applyProfileState(updateResult.state);
+      await this.refreshProxyNodes(updateResult.state);
       this.statusMessage = updateResult.message;
       this.recordLog('warn', updateResult.message);
       return;
     }
-    const runtime: RuntimeConfigResult = await RuntimeConfigService.prepareCurrentProfile(context, updateResult.state);
+    // 下载成功后才把它切成当前配置：点「保存」的意图就是要用这份订阅。
+    const activeState: ProfileState = await ProfileStore.activate(context, profile.uid);
+    this.applyProfileState(activeState);
+    await this.refreshProxyNodes(activeState);
+    const runtime: RuntimeConfigResult = await RuntimeConfigService.prepareCurrentProfile(context, activeState);
     if (runtime.ok) {
       this.runtimeConfigPath = runtime.configPath;
       this.runtimeConfigInfo = `${runtime.profileName} · ${runtime.size}`;

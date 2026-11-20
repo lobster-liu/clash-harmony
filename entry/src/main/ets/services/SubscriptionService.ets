@@ -30,7 +30,7 @@ export class SubscriptionService {
     if (profile.type !== 'remote') {
       return {
         ok: false,
-        message: '当前只支持更新远程订阅',
+        message: `「${profile.name}」是本机配置文件，不能在线更新（只有订阅链接才能下载）`,
         state: state
       };
     }
