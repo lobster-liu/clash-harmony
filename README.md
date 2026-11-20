@@ -2,6 +2,46 @@
 
 Clash Harmony 是一个 HarmonyOS / ArkTS Stage 工程，用于在鸿蒙设备上运行 Clash/mihomo 风格的代理与 VPN 工作流。当前版本已经接入真实 `arm64-v8a` mihomo native 库，支持订阅导入、节点测速、策略切换、VPN 启停、controller 诊断和首页实时状态刷新。
 
+## 本 fork 的改动（相对上游）
+
+这个 fork（`lobster-liu/clash-harmony`）不是简单同步上游，而是在 Pura X Max（`HOP-AL10`，HarmonyOS 7.0.0.111 / API 26，`deviceType=phone`）上真机跑通订阅、分流、诊断整条链路时，把踩到的坑逐条修掉。下面按「现象 → 原因 → 改动」说清楚改了什么，代码细节见 [docs/subscription-import-troubleshooting.md](docs/subscription-import-troubleshooting.md) 与 [docs/routing-rules.md](docs/routing-rules.md)。
+
+### 1. 订阅下载永远失败（2300007 / `Failed to connect to the server`）
+
+**现象**：同一个订阅 URL，手机浏览器和 `adb shell` 都能打开，App 里点「保存」必定失败，诊断日志只有一句通用文案。
+
+**原因**：VPN 扩展先建 TUN、后起 mihomo；用户中途退出或核心起不来时，扩展进程被系统杀掉，但 `vpn-tun` 网卡会残留在系统里（连 `force-stop` 都不会清掉，只能重启）。残留隧道会把 **App 自己进程**的 HTTP 请求也吸进去，而隧道后面没有可用的核心，于是 DNS 成功（`dnsDur ≈ 0.1s`）、TCP 连接瞬间被拒（`connectDur 0.000`、`osErr 111`）——这就是 NETSTACK 里那串 2300007 的真实含义。原来的代码还有两个硬伤把这些线索全盖住了：`VpnService` 把包名写死成 `io.github.clashharmony.app`（换包名侧载时 want 根本对不上），以及起 VPN 只等 5 秒就把「隧道没建好」当失败。
+
+**改动**：`VpnService` 改为从 `bundleManager` 读取自身包名；启动超时放宽到 20 秒，并以「TUN 是否真的存在」为成功判据；新增 `tunnelPresent()`（先查默认网络的 `BEARER_VPN` 能力，回退读 `/proc/net/route`）、`releaseTunnelForDownload()` 和 `clearOrphanTunnel()`。`SubscriptionService` 在下载失败且检测到隧道时，自动断开隧道重试一次，并在文案里提示用户重新连接。`Index` 在加载配置时清理上次泄漏的隧道，隧道被临时断开后界面也会跟着回落到「未连接」。
+
+### 2. 本地文件 / sing-box JSON 导入不了
+
+**现象**：用系统文件选择器挑一个 `profile_share.json`，一定报「本地文件导入失败，请确认文件可访问且为文本 YAML」，而且看不出是读文件失败还是解析失败。
+
+**原因**：两层。选择器返回的是 `file://docs/...` 这种能力型 URI，`fileIo.readText(uri)` 只认真实路径、直接抛异常，异常又被统一 catch 成一句文案；即便读到了，转换器也只认 Clash YAML 和 `ss://` 链接，遇到 sing-box 的 `outbounds` 就当解析失败。
+
+**改动**：`LocalFileImportService` 改成 `openSync` + `readSync` + `TextDecoder` 的 fd 读法，把 `BusinessError.code · message` 透出到界面，并在失败时打印内容嗅探结果（长度、首字符、命中的键名、节点类型直方图，不含密码），文件过滤器加上 `JSON`。新增 `SingBoxConverterService`，把 sing-box 的 `vless` / `vmess` / `trojan` / `shadowsocks` / `hysteria2` 出站（含 `ws`、`grpc`、`reality`、`obfs` 参数）翻成 Clash 节点。实测一个 37 KB、32 个节点的 sing-box 配置可以全量导入并成功连上。
+
+### 3. 分流规则对齐「OpenClash 自定义规则 A」
+
+**现象**：导入后用的是订阅自带的分组和规则，国内站点走代理、规则没法按自己的偏好调；手机侧也没有 `geosite.dat` / `geoip.dat`，`GEOSITE` 规则根本无从谈起。
+
+**改动**：每次生成运行配置时，`RuleTemplateService` 保留订阅里的 `proxies`，丢弃订阅自带的 `proxy-groups` / `rules` / `dns` / `hosts`，改按自定义规则 A 重建分组与规则——36 个分组（全部节点、自动选择、按节点名关键词归类的五区 url-test、冷门节点、手动选择、Default、漏网之鱼、非标端口 + 22 个应用组），34 条规则（adobe → 私网 → 国内直连 → 应用组 → gfw → 非标端口 → `MATCH`）。「非标端口」原来依赖远程 rule-provider `Custom_Port_Direct.yaml`，这里内联成三条等价的 `DST-PORT` 区间规则（除 80/443 之外全部走 `🔀 非标端口` 组），省掉运行期下载规则集这个新的失败点。`GeoDataService` 把随包的 `geosite.dat` / `geoip.dat` 落盘到 mihomo 的 home 目录（`files/runtime`），所以清数据、升级之后不必手工推文件，并开启 `geodata-mode`。顺带把「带 geo 数据后起核要 3 秒、界面只等 1.6 秒就把刚起来的核杀掉」的超时也调对了。
+
+### 4. 界面高亮不跟随点击
+
+**现象**：诊断页点「日志 / 规则 / DNS」，下面内容换了但高亮不动；代理页切换分组、配置页切换导入入口同样是「点了没反应」，后来还出现过两个按钮同时高亮。
+
+**原因**：ArkUI 里 `@Builder` 的**按值传参数不会随状态变化重绘**。高亮状态是通过 `this.ModeButton('日志', this.diagSegment === '日志')` 这种形式传进去的，状态变了但 builder 拿到的是旧布尔值；配置页更糟——「导入订阅」写死高亮，另外两个入口用另一套判断，于是会同时亮。
+
+**改动**：把状态读取移进 builder 内部（`this.diagSegment`、`this.selectedProxyGroup`、`importTabActive()`），静态占位 chip 单独抽成 `StaticChip`；配置页三个入口改成真正的互斥分段（展开导入面板时只亮「导入订阅」，点本地文件/剪贴板会先收面板）。顺手修了代理页那句永远写着「等待核心同步」的副标题，改成真实的「N 个节点 · M 个分组」。
+
+### 5. 构建与侧载
+
+上游 `build-profile.json5` 里的签名材料指向作者 Mac 上的路径，并且带了 hvigor 不接受的明文口令，别的机器直接构建失败。这里清空 `signingConfigs`，让 `assembleHap` 产出未签名 HAP，再用 `hap-sign-tool` + 本地调试证书签名后 `install -r` 侧载；本机流水线在 `scripts/sideload.local.ps1`（含设备序列号与口令，已在 `.gitignore` 里排除）。换包名侧载的原因写在文档里：调试 profile 绑定包名，上游那个包名在本机被另一个 App 占用了。
+
+> 说明：以上改动都在真机上验证过，测试设备为 HUAWEI Pura X Max 典藏版（`HOP-AL10`，API 26，`deviceType=phone`）。
+
 ## 当前状态
 
 更新时间：2026-07-09
