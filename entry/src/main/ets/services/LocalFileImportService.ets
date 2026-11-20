@@ -1,5 +1,7 @@
 import { common } from '@kit.AbilityKit';
+import { BusinessError } from '@kit.BasicServicesKit';
 import { fileIo, picker } from '@kit.CoreFileKit';
+import { util } from '@kit.ArkTS';
 import { ClashProfile, createLocalProfile, ProfileState } from '../models/Profile';
 import { ClashConfigParserService, ParsedProxyNode } from './ClashConfigParserService';
 import { GenericSubscriptionConverterService, ConvertedSubscription } from './GenericSubscriptionConverterService';
@@ -18,18 +20,90 @@ export class LocalFileImportService {
       const documentPicker: picker.DocumentViewPicker = new picker.DocumentViewPicker(context);
       const uris: string[] = await documentPicker.select({
         maxSelectNumber: 1,
-        fileSuffixFilters: ['YAML|.yaml,.yml', 'Text|.txt,.conf', 'All|.*']
+        fileSuffixFilters: ['YAML|.yaml,.yml', 'JSON|.json', 'Text|.txt,.conf', 'All|.*']
       });
       if (uris.length === 0) {
         return LocalFileImportService.failure('未选择文件', state);
       }
 
       const uri: string = uris[0];
-      const content: string = await fileIo.readText(uri);
+      const content: string = LocalFileImportService.readUriText(uri);
       return LocalFileImportService.importFromContent(context, content, uri);
     } catch (err) {
-      return LocalFileImportService.failure('本地文件导入失败，请确认文件可访问且为文本 YAML', state);
+      const detail: string = LocalFileImportService.describeError(err);
+      return LocalFileImportService.failure(`本地文件导入失败（${detail}）`, state);
     }
+  }
+
+  private static readUriText(uri: string): string {
+    let file: fileIo.File | undefined = undefined;
+    try {
+      file = fileIo.openSync(uri, fileIo.OpenMode.READ_ONLY);
+      const stat: fileIo.Stat = fileIo.statSync(file.fd);
+      const size: number = stat.size > 0 ? stat.size : 0;
+      if (size === 0) {
+        return '';
+      }
+      const buffer: ArrayBuffer = new ArrayBuffer(size);
+      const readLength: number = fileIo.readSync(file.fd, buffer);
+      const decoder: util.TextDecoder = util.TextDecoder.create('utf-8');
+      return decoder.decodeToString(new Uint8Array(buffer.slice(0, readLength)));
+    } finally {
+      if (file) {
+        try {
+          fileIo.closeSync(file);
+        } catch (closeErr) {
+        }
+      }
+    }
+  }
+
+  private static describeError(err: Object): string {
+    const error: BusinessError = err as BusinessError;
+    const code: number | undefined = error.code;
+    const message: string = error.message !== undefined ? error.message : '';
+    if (code === undefined) {
+      return message.length > 0 ? message : '未知错误';
+    }
+    return `${code} · ${message}`;
+  }
+
+  private static sniff(content: string): string {
+    const trimmed: string = content.trim();
+    const head: string = trimmed.length > 0 ? trimmed.charAt(0) : '空';
+    const keys: string[] = [
+      '"proxies"', '"outbounds"', '"servers"', '"nodes"',
+      'proxies:', 'proxy-providers:', 'proxy-groups:', 'rules:'
+    ];
+    const hits: string[] = [];
+    for (let index = 0; index < keys.length; index++) {
+      if (content.indexOf(keys[index]) >= 0) {
+        hits.push(keys[index]);
+      }
+    }
+    const hitText: string = hits.length > 0 ? hits.join(' ') : '无';
+    const typeText: string = LocalFileImportService.sniffJsonTypes(content);
+    return `（诊断：${content.length} 字符，首字符 ${head}，命中 ${hitText}${typeText}）`;
+  }
+
+  private static sniffJsonTypes(content: string): string {
+    const pattern: RegExp = /"type"\s*:\s*"([a-zA-Z0-9_-]+)"/g;
+    const counter: Map<string, number> = new Map<string, number>();
+    let match: RegExpExecArray | null = pattern.exec(content);
+    while (match !== null) {
+      const key: string = match[1];
+      const current: number | undefined = counter.get(key);
+      counter.set(key, current === undefined ? 1 : current + 1);
+      match = pattern.exec(content);
+    }
+    if (counter.size === 0) {
+      return '';
+    }
+    const parts: string[] = [];
+    counter.forEach((count: number, key: string) => {
+      parts.push(`${key}×${count}`);
+    });
+    return `，类型 ${parts.join(' ')}`;
   }
 
   static async importFromContent(context: common.Context, content: string, fileName: string): Promise<FileImportResult> {
@@ -40,7 +114,7 @@ export class LocalFileImportService {
 
     const converted: ConvertedSubscription = GenericSubscriptionConverterService.normalizeToClashYaml(content);
     if (!converted.ok) {
-      return LocalFileImportService.failure(converted.message, state);
+      return LocalFileImportService.failure(`${converted.message}${LocalFileImportService.sniff(content)}`, state);
     }
 
     const uid: string = `file_${Date.now()}`;

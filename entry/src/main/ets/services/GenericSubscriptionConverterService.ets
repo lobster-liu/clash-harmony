@@ -1,5 +1,6 @@
 import { util } from '@kit.ArkTS';
 import { ClashConfigParserService, ParsedProxyNode } from './ClashConfigParserService';
+import { SingBoxConverterService } from './SingBoxConverterService';
 
 export interface ConvertedSubscription {
   ok: boolean;
@@ -49,6 +50,12 @@ export class GenericSubscriptionConverterService {
       }
     }
 
+    const jsonConverted: ConvertedSubscription | undefined =
+      GenericSubscriptionConverterService.tryConvertJson(trimmed);
+    if (jsonConverted !== undefined) {
+      return jsonConverted;
+    }
+
     return {
       ok: false,
       message: '订阅内容不是 Clash/Mihomo YAML，也未识别到可转换的 Shadowsocks 节点',
@@ -56,6 +63,155 @@ export class GenericSubscriptionConverterService {
       nodeCount: 0,
       converted: false
     };
+  }
+
+  private static tryConvertJson(text: string): ConvertedSubscription | undefined {
+    const head: string = text.length > 0 ? text.charAt(0) : '';
+    if (head !== '{' && head !== '[') {
+      return undefined;
+    }
+
+    let parsed: Object | undefined = undefined;
+    try {
+      parsed = JSON.parse(text) as Object;
+    } catch (err) {
+      return undefined;
+    }
+    if (parsed === undefined) {
+      return undefined;
+    }
+
+    let list: Object[] = [];
+    if (Array.isArray(parsed)) {
+      list = parsed as Object[];
+    } else {
+      const root: Record<string, Object> = parsed as Record<string, Object>;
+      const proxies: Object | undefined = root.proxies;
+      if (proxies !== undefined && Array.isArray(proxies)) {
+        list = proxies as Object[];
+      } else if (root.outbounds !== undefined) {
+        return SingBoxConverterService.convert(text);
+      } else if (root.servers !== undefined) {
+        return {
+          ok: false,
+          message: '这是 v2rayN 等客户端的配置（servers），暂不支持转换；请导入 Clash/Mihomo 的 YAML 或 JSON',
+          text: '',
+          nodeCount: 0,
+          converted: false
+        };
+      } else {
+        return {
+          ok: false,
+          message: 'JSON 里没有找到 proxies 或节点数组，暂不支持这种格式',
+          text: '',
+          nodeCount: 0,
+          converted: false
+        };
+      }
+    }
+
+    if (list.length === 0) {
+      return undefined;
+    }
+
+    const yaml: string = GenericSubscriptionConverterService.buildClashYamlFromJson(list);
+    const nodes: ParsedProxyNode[] = ClashConfigParserService.parseProxyNodes(yaml);
+    return {
+      ok: true,
+      message: '已将 JSON 配置转换为 Clash YAML',
+      text: yaml,
+      nodeCount: nodes.length,
+      converted: true
+    };
+  }
+
+  private static buildClashYamlFromJson(list: Object[]): string {
+    const lines: string[] = [
+      'mixed-port: 7890',
+      'allow-lan: false',
+      'mode: rule',
+      'log-level: info',
+      'external-controller: 127.0.0.1:9090',
+      'secret: ""',
+      'proxies:'
+    ];
+
+    const names: string[] = [];
+    for (let index = 0; index < list.length; index++) {
+      const record: Record<string, Object> = list[index] as Record<string, Object>;
+      const rawName: Object | undefined = record.name;
+      const name: string = typeof rawName === 'string' && (rawName as string).length > 0 ?
+        rawName as string : `node-${index + 1}`;
+      names.push(name);
+      record.name = name;
+      GenericSubscriptionConverterService.emitJsonMapping(record, lines, '  ', true);
+    }
+
+    lines.push('proxy-groups:');
+    lines.push('  - name: Proxy');
+    lines.push('    type: select');
+    lines.push('    proxies:');
+    for (let index = 0; index < names.length; index++) {
+      lines.push(`      - ${GenericSubscriptionConverterService.yamlString(names[index])}`);
+    }
+    lines.push('rules:');
+    lines.push('  - MATCH,Proxy');
+    lines.push('');
+    return lines.join('\n');
+  }
+
+  private static emitJsonMapping(
+    record: Record<string, Object>,
+    lines: string[],
+    indent: string,
+    dashed: boolean
+  ): void {
+    const keys: string[] = Object.keys(record);
+    let first: boolean = true;
+    for (let index = 0; index < keys.length; index++) {
+      const key: string = keys[index];
+      const value: Object | undefined = record[key];
+      if (value === undefined || value === null) {
+        continue;
+      }
+      const linePrefix: string = dashed && first ? `${indent}- ` : `${indent}${dashed ? '  ' : ''}`;
+      const childIndent: string = dashed ? `${indent}    ` : `${indent}  `;
+      const scalar: string | undefined = GenericSubscriptionConverterService.scalarToYaml(value);
+      if (scalar !== undefined) {
+        lines.push(`${linePrefix}${key}: ${scalar}`);
+      } else if (Array.isArray(value)) {
+        lines.push(`${linePrefix}${key}:`);
+        const items: Object[] = value as Object[];
+        for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+          const item: Object = items[itemIndex];
+          const itemScalar: string | undefined = GenericSubscriptionConverterService.scalarToYaml(item);
+          if (itemScalar !== undefined) {
+            lines.push(`${childIndent}- ${itemScalar}`);
+          } else {
+            GenericSubscriptionConverterService.emitJsonMapping(
+              item as Record<string, Object>, lines, childIndent, true);
+          }
+        }
+      } else {
+        lines.push(`${linePrefix}${key}:`);
+        GenericSubscriptionConverterService.emitJsonMapping(
+          value as Record<string, Object>, lines, childIndent, false);
+      }
+      first = false;
+    }
+  }
+
+  private static scalarToYaml(value: Object): string | undefined {
+    if (typeof value === 'string') {
+      return GenericSubscriptionConverterService.yamlString(value as string);
+    }
+    if (typeof value === 'number') {
+      return `${value as number}`;
+    }
+    if (typeof value === 'boolean') {
+      return (value as boolean) ? 'true' : 'false';
+    }
+    return undefined;
   }
 
   private static parseShadowsocksNodes(text: string): ShadowsocksNode[] {
