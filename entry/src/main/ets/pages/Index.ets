@@ -563,7 +563,8 @@ struct Index {
   }
 
   private importTabActive(key: string): boolean {
-    return key === '订阅' ? this.showImportPanel : this.importSegment === key;
+    if (key === '订阅') { return this.showImportPanel; }
+    return !this.showImportPanel && this.importSegment === key;
   }
 
   private async handleImportEntry(key: string): Promise<void> {
@@ -572,6 +573,7 @@ struct Index {
       this.showImportPanel = !this.showImportPanel;
       return;
     }
+    this.showImportPanel = false;
     if (key === '本地文件') {
       await this.importLocalFile();
       return;
