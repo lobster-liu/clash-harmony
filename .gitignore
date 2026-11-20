@@ -13,3 +13,7 @@ local.properties
 *.har
 *.log
 .DS_Store
+
+# 本机侧载与签名产物（含设备序列号、口令，切勿提交）
+sign-work/
+scripts/*.local.ps1
