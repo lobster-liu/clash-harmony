@@ -157,6 +157,7 @@ struct Index {
   @State private speedTestProgress: string = '';
   @State private speedTestSummary: string = '';
   @State private diagSegment: string = '连接';
+  @State private importSegment: string = '订阅';
   @State private controllerStatus: ControllerStatus = {
     available: false,
     version: '',
@@ -559,6 +560,23 @@ struct Index {
     }
     this.syncHomeRuntimeFields();
     this.recordLog(runtime.ok ? 'info' : 'warn', this.statusMessage);
+  }
+
+  private importTabActive(key: string): boolean {
+    return key === '订阅' ? this.showImportPanel : this.importSegment === key;
+  }
+
+  private async handleImportEntry(key: string): Promise<void> {
+    this.importSegment = key;
+    if (key === '订阅') {
+      this.showImportPanel = !this.showImportPanel;
+      return;
+    }
+    if (key === '本地文件') {
+      await this.importLocalFile();
+      return;
+    }
+    await this.importFromClipboard();
   }
 
   private async importFromClipboard(): Promise<void> {
@@ -1670,13 +1688,15 @@ struct Index {
     .borderRadius(8).border({ width: 1, color: '#E2E8F0' })
   }
 
+  // 状态在 @Builder 内部读取：按值传入的布尔参数不会随状态变化重绘，
+  // 会出现「内容切换了但高亮没动」（诊断页分段、代理页分组都是这个坑）。
   @Builder
-  private ModeButton(text: string, active: boolean) {
+  private ModeButton(text: string) {
     Text(text).width('100%').height(36).textAlign(TextAlign.Center).fontSize(13)
-      .fontWeight(active ? FontWeight.Bold : FontWeight.Regular)
-      .fontColor(active ? '#FFFFFF' : '#475569')
-      .backgroundColor(active ? '#0F766E' : '#F8FAFC').borderRadius(6)
-      .border({ width: 1, color: active ? '#0F766E' : '#CBD5E1' })
+      .fontWeight(this.diagSegment === text ? FontWeight.Bold : FontWeight.Regular)
+      .fontColor(this.diagSegment === text ? '#FFFFFF' : '#475569')
+      .backgroundColor(this.diagSegment === text ? '#0F766E' : '#F8FAFC').borderRadius(6)
+      .border({ width: 1, color: this.diagSegment === text ? '#0F766E' : '#CBD5E1' })
   }
 
   @Builder
@@ -1692,12 +1712,30 @@ struct Index {
   }
 
   @Builder
-  private GroupButton(text: string, active: boolean) {
+  private GroupButton(text: string) {
+    Text(text).fontSize(13).fontWeight(this.selectedProxyGroup === text ? FontWeight.Bold : FontWeight.Regular)
+      .fontColor(this.selectedProxyGroup === text ? '#2563EB' : '#64748B')
+      .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+      .backgroundColor(this.selectedProxyGroup === text ? '#EFF6FF' : '#FFFFFF').borderRadius(8)
+      .border({ width: 1, color: this.selectedProxyGroup === text ? '#BFDBFE' : '#DBE3EF' })
+  }
+
+  @Builder
+  private StaticChip(text: string, active: boolean) {
     Text(text).fontSize(13).fontWeight(active ? FontWeight.Bold : FontWeight.Regular)
       .fontColor(active ? '#2563EB' : '#64748B')
       .padding({ left: 12, right: 12, top: 8, bottom: 8 })
       .backgroundColor(active ? '#EFF6FF' : '#FFFFFF').borderRadius(8)
       .border({ width: 1, color: active ? '#BFDBFE' : '#DBE3EF' })
+  }
+
+  @Builder
+  private ImportEntryButton(label: string, key: string) {
+    Button(label).layoutWeight(1).height(38)
+      .fontColor(this.importTabActive(key) ? '#FFFFFF' : '#0F172A')
+      .backgroundColor(this.importTabActive(key) ? '#0F766E' : '#EEF2F7')
+      .borderRadius(8)
+      .onClick(() => { this.handleImportEntry(key) })
   }
 
   @Builder
@@ -1985,14 +2023,14 @@ struct Index {
         if (this.proxyGroups.length > 0) {
           Row({ space: 8 }) {
             ForEach(this.proxyGroups, (group: ProxyGroupInfo) => {
-              Column() { this.GroupButton(group.name, this.selectedProxyGroup === group.name) }
+              Column() { this.GroupButton(group.name) }
                 .onClick(() => { this.selectProxyGroup(group.name) })
             }, (group: ProxyGroupInfo) => group.name)
           }
         } else {
           Row({ space: 8 }) {
-            this.GroupButton('本地预览', true)
-            this.GroupButton('等待核心', false)
+            this.StaticChip('本地预览', true)
+            this.StaticChip('等待核心', false)
           }
         }
 
@@ -2041,15 +2079,9 @@ struct Index {
     Scroll() {
       Column({ space: 12 }) {
         Row({ space: 8 }) {
-          Button('导入订阅').layoutWeight(1).height(38).fontColor('#FFFFFF')
-            .backgroundColor('#0F766E').borderRadius(8)
-            .onClick(() => { this.showImportPanel = !this.showImportPanel })
-          Button('本地文件').layoutWeight(1).height(38).fontColor('#0F172A')
-            .backgroundColor('#EEF2F7').borderRadius(8)
-            .onClick(() => { this.importLocalFile() })
-          Button('剪贴板').layoutWeight(1).height(38).fontColor('#0F172A')
-            .backgroundColor('#EEF2F7').borderRadius(8)
-            .onClick(() => { this.importFromClipboard() })
+          this.ImportEntryButton('导入订阅', '订阅')
+          this.ImportEntryButton('本地文件', '本地文件')
+          this.ImportEntryButton('剪贴板', '剪贴板')
         }
 
         if (this.showImportPanel) { this.ImportPanel() }
@@ -2115,13 +2147,13 @@ struct Index {
     Scroll() {
       Column({ space: 12 }) {
         Row({ space: 6 }) {
-          Column() { this.ModeButton('连接', this.diagSegment === '连接') }
+          Column() { this.ModeButton('连接') }
             .layoutWeight(1).onClick(() => { this.diagSegment = '连接' })
-          Column() { this.ModeButton('日志', this.diagSegment === '日志') }
+          Column() { this.ModeButton('日志') }
             .layoutWeight(1).onClick(() => { this.diagSegment = '日志' })
-          Column() { this.ModeButton('规则', this.diagSegment === '规则') }
+          Column() { this.ModeButton('规则') }
             .layoutWeight(1).onClick(() => { this.diagSegment = '规则' })
-          Column() { this.ModeButton('DNS', this.diagSegment === 'DNS') }
+          Column() { this.ModeButton('DNS') }
             .layoutWeight(1).onClick(() => { this.diagSegment = 'DNS' })
         }
         .padding(4).backgroundColor('#EEF2F7').borderRadius(8)
