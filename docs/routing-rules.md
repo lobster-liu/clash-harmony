@@ -36,8 +36,13 @@ GeoSite,category-games          -> DIRECT
 GeoSite,category-public-tracker -> DIRECT
 … 22 个应用组（GeoSite,<name> -> 分组）…
 GeoSite,gfw                     -> 🚀 手动选择
+DstPort,1-79                    -> 🔀 非标端口
+DstPort,81-442                  -> 🔀 非标端口
+DstPort,444-65535               -> 🔀 非标端口
 MATCH                           -> 🐟 漏网之鱼
 ```
+
+合计 34 条。`🔀 非标端口` 组默认选 `🐟 遵循规则`（→ `🐟 漏网之鱼`），也可以手动切到 `DIRECT`。
 
 ## geo 数据
 
@@ -50,12 +55,12 @@ mihomo 的 `homeDir` 是 `<files>/runtime`（见 `mihomo-go-public.log` 的 `app
 ## 已知边界
 
 - `dns` / `hosts` / `proxy-groups` / `rules` 由本工程托管，订阅里的同名段落会被丢弃（这是刻意行为，否则规则 A 会被订阅覆盖）。
-- 规则 A 里的「非标端口」依赖远程 rule-provider `Custom_Port_Direct.yaml`，手机端未接入远程规则集，`🔀 非标端口` 组目前只是占位。
+- 规则 A 里的「非标端口」原本依赖远程 rule-provider `Custom_Port_Direct.yaml`（`Aethersailor/Custom_OpenClash_Rules`，payload 只有「除 80/443 之外的全部端口」三条区间）。这里内联成三条等价的 `DST-PORT` 原生规则，避免运行期下载规则集成为新的失败点；如果以后要跟随上游规则集，可以改回 `rule-providers` + `RULE-SET`。
 - sing-box JSON 转换出的配置只有 `MATCH,Proxy`，导入后由本模板接管，无需手工改。
 
 ## 验证（2026-11-20，Pura X Max / API 26）
 
 - `GET /proxies` → 36 个分组，节点分布 `JP 8 / US 11 / TW 1 / 冷门 12 / 全部 32`；
 - `GET /connections` → 华为云域名命中 `rule=GeoSite,cn  chain=DIRECT`（国内直连生效）；
-- `GET /rules` → 31 条，顺序与上表一致，`GeoSite,gfw -> 🚀 手动选择`；
+- `GET /rules` → 34 条，顺序与上表一致，`GeoSite,gfw -> 🚀 手动选择`，三条 `DstPort,* -> 🔀 非标端口`；
 - `GET /proxies/🚀 手动选择/delay` → `{"delay":66}`，`/proxies/🌐 Default/delay` → `{"delay":351}`（分组的出站链路可用）。

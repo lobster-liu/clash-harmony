@@ -240,6 +240,14 @@ export class RuleTemplateService {
     }
 
     rules.push('  - GEOSITE,gfw,🚀 手动选择');
+
+    // 非标端口：等价于笔记里的 rule-provider Custom_Port_Direct.yaml
+    // （Aethersailor/Custom_OpenClash_Rules，payload 只有「除 80/443 之外的全部端口」
+    // 三条 DST-PORT 区间）。内联成原生规则，省掉运行期下载规则集的失败面。
+    rules.push(`  - DST-PORT,1-79,${G_ODD}`);
+    rules.push(`  - DST-PORT,81-442,${G_ODD}`);
+    rules.push(`  - DST-PORT,444-65535,${G_ODD}`);
+
     rules.push(`  - MATCH,${G_FINAL}`);
     return rules;
   }
