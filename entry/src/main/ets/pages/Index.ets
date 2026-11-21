@@ -1,4 +1,5 @@
 import { common } from '@kit.AbilityKit';
+import { fileIo } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { ClashConfigParserService, ParsedConfigSummary, ParsedProxyNode } from '../services/ClashConfigParserService';
 import { ClipboardImportResult, ClipboardImportService } from '../services/ClipboardImportService';
@@ -16,6 +17,13 @@ import { FileImportResult, LocalFileImportService } from '../services/LocalFileI
 import { ProfileStore } from '../services/ProfileStore';
 import { RuntimeConfigResult, RuntimeConfigService } from '../services/RuntimeConfigService';
 import { SubscriptionService, SubscriptionUpdateResult } from '../services/SubscriptionService';
+import {
+  ProbeApplyResult,
+  ProbeEntry,
+  ProbeOptions,
+  ProbeScanResult,
+  SubscriptionProbeService
+} from '../services/SubscriptionProbeService';
 import {
   ConnectionInfo as PollerConnectionInfo,
   TrafficPollerService,
@@ -162,6 +170,10 @@ struct Index {
   @State private speedTestProgress: string = '';
   @State private speedTestSummary: string = '';
   @State private diagSegment: string = '连接';
+  @State private probeRunning: boolean = false;
+  @State private probeStatus: string = '体检当前配置：用核心实测每个节点的连通性，把能用的节点收成一份新配置。';
+  @State private probeProgress: string = '';
+  @State private probeLimit: number = 300;
   @State private importSegment: string = '订阅';
   @State private controllerStatus: ControllerStatus = {
     available: false,
@@ -446,15 +458,6 @@ struct Index {
   }
 
   private applyProfileState(state: ProfileState): void {
-    // 隧道被下载逻辑临时断开后，界面上的「已连接」状态要跟着回落。
-    if (this.vpnTunnelActive && !VpnService.tunnelPresent()) {
-      TrafficPollerService.stop();
-      this.stopHomeRefreshLoop();
-      this.connectedAt = 0;
-      this.vpnTunnelActive = false;
-      this.vpnActionText = '连接';
-      this.coreBridgeState = CoreBridgeService.markControllerReady(false, '');
-    }
     const connected: boolean = this.isRuntimeConnected();
     const current: ClashProfile | undefined = CoreService.getCurrentProfile(state);
     this.profileState = state;
@@ -714,6 +717,98 @@ struct Index {
       }
       await this.refreshConnections();
       this.syncHomeRuntimeFields();
+    }
+  }
+
+  /**
+   * 订阅体检：只用当前运行内核里已经加载的叶子节点做延迟测试。
+   * 全程不重载内核——重载会让内核重建 tun，把已经建立的 VPN 数据面弄断。
+   * 测完用存活节点生成「<名字>-可用」并设为当前，用户点「断开」再「连接」即可生效。
+   */
+  private async runSubscriptionProbe(): Promise<void> {
+    if (this.probeRunning) {
+      return;
+    }
+    const context = getContext(this) as common.Context;
+    this.probeRunning = true;
+    this.probeProgress = '准备中…';
+    this.probeStatus = '正在读取当前配置…';
+
+    try {
+      const state: ProfileState = await ProfileStore.load(context);
+      let current: ClashProfile | undefined = undefined;
+      for (let index = 0; index < state.items.length; index++) {
+        if (state.items[index].uid === state.currentUid) {
+          current = state.items[index];
+          break;
+        }
+      }
+      if (!current || current.filePath.length === 0) {
+        this.probeStatus = '请先导入并启用一个配置，再体检。';
+        return;
+      }
+
+      const text: string = await this.readProfileText(current.filePath);
+      const entries: ProbeEntry[] = SubscriptionProbeService.splitProxyEntries(text);
+      if (entries.length === 0) {
+        this.probeStatus = '当前配置里没有可体检的节点（先更新订阅，或检查是不是只含 proxy-providers）';
+        return;
+      }
+
+      const status: ControllerStatus = await MihomoControllerService.checkVersion();
+      if (!status.available) {
+        this.probeStatus = '体检需要核心在线：请先点「连接」建立 VPN，再回来体检。';
+        return;
+      }
+
+      this.probeStatus = '正在读取运行中的节点…';
+      const running: string[] = await SubscriptionProbeService.runningLeafNames();
+      const names: string[] = SubscriptionProbeService.intersectWithRunning(entries, running);
+      if (names.length === 0) {
+        this.probeStatus = '当前运行的配置里没有这份订阅的节点：先点「连接」让这份配置跑起来，再回来体检。';
+        return;
+      }
+
+      const limited: string[] = names.length > this.probeLimit && this.probeLimit > 0 ? names.slice(0, this.probeLimit) : names;
+      this.probeStatus = `开始体检 ${limited.length} 个节点（配置内 ${entries.length} 个，内核已加载 ${running.length} 个）`;
+
+      const options: ProbeOptions = {
+        limit: this.probeLimit,
+        concurrency: 8,
+        timeoutMs: 4000,
+        targets: ['https://www.gstatic.com/generate_204', 'https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/clash.yml'],
+        requireAll: false
+      };
+      const scan: ProbeScanResult = await SubscriptionProbeService.scan(limited, options, (progress) => {
+        this.probeProgress = `${progress.tested}/${progress.total} · 可用 ${progress.alive} · ${progress.current}`;
+      });
+      this.probeProgress = '';
+      if (scan.alive.length === 0) {
+        this.probeStatus = scan.message;
+        return;
+      }
+
+      const applied: ProbeApplyResult = await SubscriptionProbeService.apply(context, current.name, text, scan.alive, limited.length);
+      if (!applied.ok) {
+        this.probeStatus = `${scan.message}；${applied.message}`;
+        return;
+      }
+
+      this.applyProfileState(applied.state);
+      await this.refreshProxyNodes(applied.state);
+      this.probeStatus = `${scan.message}；${applied.message}`;
+      this.recordLog('info', this.probeStatus);
+    } catch (err) {
+      this.probeStatus = '体检失败：内部错误，请重试';
+    } finally {
+      this.probeRunning = false;
+    }
+  }
+  private async readProfileText(path: string): Promise<string> {
+    try {
+      return await fileIo.readText(path);
+    } catch (err) {
+      return '';
     }
   }
 
@@ -2190,8 +2285,34 @@ struct Index {
   }
 
   @Builder
+  private ProbeCard() {
+    Column({ space: 8 }) {
+      this.SectionTitle('订阅体检', '')
+      Text('用核心实测当前正在运行的节点，把能连通的收成一份「可用」配置；体检期间不改动当前隧道，测完点「断开」再「连接」即生效。')
+        .fontSize(12).fontColor('#64748B')
+      Row({ space: 8 }) {
+        Text(`最多测 ${this.probeLimit} 个节点`).fontSize(12).fontColor('#475569').layoutWeight(1)
+        Button(this.probeRunning ? '体检中…' : '开始体检')
+          .height(32).fontSize(13).fontColor('#FFFFFF').borderRadius(8)
+          .backgroundColor(this.probeRunning ? '#94A3B8' : '#0F766E')
+          .enabled(!this.probeRunning)
+          .onClick(() => { this.runSubscriptionProbe() })
+      }
+      .width('100%')
+
+      if (this.probeProgress.length > 0) {
+        Text(this.probeProgress).fontSize(12).fontColor('#0F766E').width('100%')
+      }
+      Text(this.probeStatus).fontSize(12).fontColor('#475569').width('100%')
+    }
+    .padding(12).backgroundColor('#FFFFFF').borderRadius(8).border({ width: 1, color: '#99F6E4' })
+  }
+
+  @Builder
   private DiagnosticsConnectionSegment() {
     Column({ space: 12 }) {
+      this.ProbeCard()
+
       Column({ space: 10 }) {
         this.SectionTitle('连接概览', '关闭全部')
         Row({ space: 8 }) {

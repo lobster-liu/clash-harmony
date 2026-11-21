@@ -42,6 +42,16 @@ Clash Harmony 是一个 HarmonyOS / ArkTS Stage 工程，用于在鸿蒙设备�
 
 上游 `build-profile.json5` 里的签名材料指向作者 Mac 上的路径，并且带了 hvigor 不接受的明文口令，别的机器直接构建失败。这里清空 `signingConfigs`，让 `assembleHap` 产出未签名 HAP，再用 `hap-sign-tool` + 本地调试证书签名后 `install -r` 侧载；本机流水线在 `scripts/sideload.local.ps1`（含设备序列号与口令，已在 `.gitignore` 里排除）。换包名侧载的原因写在文档里：调试 profile 绑定包名，上游那个包名在本机被另一个 App 占用了。
 
+### 6. 订阅体检（手机内完成，不依赖 PC）
+
+**现象**：免费订阅动辄几百上千个节点，九成是死的；手动一个个点「测速」找可用的太费劲。
+
+**做法**：诊断页新增「订阅体检」卡片。点一下，就用当前内核实测**正在运行的节点**，把连得通（gstatic 与 GitHub raw 都要通）的挑出来，生成一份新的本地配置「<原配置名>-可用」并设为当前。
+
+**关键决定**：体检**不重载内核**。中途验证过 mihomo 的热重载（`PUT /configs`）确实能让 `/proxies` 立刻换成新节点表，但重载会让内核重建 tun、把已经建立的 VPN 数据面弄断——表现为首页立刻掉成「未连接」、`/group/.../delay` 全部超时，必须重新连接才能恢复。所以体检只对「内核里已经加载的叶子节点」做 `GET /proxies/<name>/delay`，完全不碰运行中的配置；生成的配置只落盘、不热切，提示用户「点『断开』再『连接』生效」。
+
+**另外修掉的两个小坑**：默认出口排序（`🌐 Default` 首位改成 `♻️ 自动选择`，避免某个地区组全挂时兜底流量一起死）；配置页行文字不刷新（`ForEach` 的 key 里带上 `nodeCount`/`updatedAt`）。
+
 > 说明：以上改动都在真机上验证过，测试设备为 HUAWEI Pura X Max 典藏版（`HOP-AL10`，API 26，`deviceType=phone`）。
 
 ## 当前状态

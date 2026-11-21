@@ -46,6 +46,25 @@ export class ProfileStore {
     return next;
   }
 
+  /**
+   * 追加一条本地配置并设为当前（体检生成「可用节点」配置时用）。
+   */
+  static async addLocal(context: common.Context, profile: ClashProfile): Promise<ProfileState> {
+    const state: ProfileState = await ProfileStore.load(context);
+    const items: ClashProfile[] = [];
+    for (let index = 0; index < state.items.length; index++) {
+      items.push(state.items[index]);
+    }
+    items.push(profile);
+
+    const next: ProfileState = {
+      currentUid: profile.uid,
+      items: items
+    };
+    await ProfileStore.save(context, next);
+    return next;
+  }
+
   static async activate(context: common.Context, uid: string): Promise<ProfileState> {
     const state: ProfileState = await ProfileStore.load(context);
     let found: boolean = false;

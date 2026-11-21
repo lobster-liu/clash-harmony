@@ -148,6 +148,21 @@ export class MihomoControllerService {
     );
   }
 
+  /**
+   * 热重载运行配置：`PUT /configs {"path": ...}`。
+   * 内核只允许加载自己的运行目录（`.../files/runtime`）下的文件，
+   * 所以配置文件必须先由 App 写到那里。成功时隧道不会断开。
+   */
+  static async reloadConfig(configPath: string): Promise<ControllerTextResult> {
+    const result: ControllerResponse = await MihomoControllerService.requestText(
+      '/configs',
+      http.RequestMethod.PUT,
+      JSON.stringify({ path: configPath }),
+      20000
+    );
+    return MihomoControllerService.toTextResult(result);
+  }
+
   static async getConnections(): Promise<ControllerTextResult> {
     return MihomoControllerService.toTextResult(
       await MihomoControllerService.requestText('/connections', http.RequestMethod.GET, '')
